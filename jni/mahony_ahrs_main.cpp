@@ -29,15 +29,18 @@ static int imuCount = 0;
 
 static bool isFirstImage = true;
 CVD::Image<CVD::byte> imageData;
-//CVD::Image<float> SBI;
-//CVD::Image<float> mimTemplate;
 CVD::ImageRef SBISize;
+TooN::SO3<> pose_reset;
 float state_reset[7];
 int frameCount = 0;
 
 SmallBlurryImage SBI;
 SmallBlurryImage SI;
 int countFromCorrection = 0;
+
+/*
+* Code for imu pose.
+*/
 
 // Init imu pose
 void InitIMU(float* pimuval, float* q)
@@ -75,9 +78,10 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateIMU( JNIEnv* env, j
         __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
                 "JNI Init IMU called, init q : %f %f %f %f", pq[0], pq[1], pq[2], pq[3]);
     } else {
-        // caculate the frequency
+
         gettimeofday(&tend, 0);
-        imufreq = 1 / (((tend.tv_sec - tstart.tv_sec)*1000000u + tend.tv_usec - tstart.tv_usec)/1000000.f);
+        imufreq = 1 / (((tend.tv_sec - tstart.tv_sec)*1000000u
+                + tend.tv_usec - tstart.tv_usec)/1000000.f);        // caculate the frequency
         gettimeofday(&tstart, 0);
     }
 
@@ -85,7 +89,7 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateIMU( JNIEnv* env, j
             imufreq, pq[0], pq[1], pq[2], pq[3]);
 
     imuCount++;
-    if (imuCount==100) {
+    if (imuCount==200) {
         __android_log_print(ANDROID_LOG_INFO, "JNIMsg", "JNI nativeUpdateIMU called,"
                 "imufreq: %f, q : %f %f %f %f", imufreq, pq[0], pq[1], pq[2], pq[3]);
         imuCount=0;
@@ -95,24 +99,15 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateIMU( JNIEnv* env, j
     env->ReleaseFloatArrayElements(q, pq, 0);
 }
 
+/*
+* Following code is for vision correction.
+*/
+
 // Reset Vidsion
 JNIEXPORT void JNICALL
 Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeResetVision( JNIEnv* env, jobject thiz)
 {
     isFirstImage = true;
-}
-
-double SSD(CVD::Image<float> & sbi1, CVD::Image<float> & sbi2)
-{
-    double dSSD = 0.0;
-    CVD::ImageRef ir;
-    do
-    {
-      double dDiff = sbi1[ir] - sbi2[ir];
-      dSSD += dDiff * dDiff;
-    }
-    while(ir.next(SBISize));
-    return dSSD;
 }
 
 TooN::Vector<4> QFromW(const TooN::Vector<3> & w) {
@@ -129,13 +124,17 @@ TooN::Vector<3> WFromQ(const TooN::Vector<4> & q) {
     return TooN::makeVector(rad*q[1]/len, rad*q[2]/len, rad*q[3]/len );
 }
 
-TooN::SO3<> CalcSBIRotation()
+std::pair< TooN::SO3<>, double> CalcSBIRotation()
 {
-    static ATANCamera mCamera("nothing.txt");   // to be inited from file
+    static ATANCamera mCamera("/sdcard/calibration/calibration.txt");               // to be inited from file
     std::pair<TooN::SE2<>, double> result_pair;
-    result_pair = SI.IteratePosRelToTarget(SBI, 6);
+    result_pair = SI.IteratePosRelToTarget(SBI, 10);
     TooN::SE3<> se3Adjust = SmallBlurryImage::SE3fromSE2(result_pair.first, mCamera);
-    return se3Adjust.get_rotation();
+    //__android_log_print(ANDROID_LOG_INFO, "JNIMsg",
+    //                   "JNI CalcSBIRotation called,"
+    //                    "error: %f",
+    //                    result_pair.second);
+    return std::pair< TooN::SO3<>, double >(se3Adjust.get_rotation(), result_pair.second);
 }
 
 // Update by vision
@@ -147,84 +146,19 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateVision( JNIEnv* env
     if (isFirstUpdate) return;      // if has not do imu update,
                                     // return
 
+    // get image array data
     int len = env->GetArrayLength(imageArray);
     imageData.resize(CVD::ImageRef(width, height));
     env->GetByteArrayRegion(imageArray, 0, width*height, (jbyte*)imageData.data() );
 
-/*    if (isFirstImage) {
-        while (imageData.size().x > 40) {
-            imageData = halfSample(imageData);
-        }
-        SBISize = imageData.size();
-        __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
-                "JNI nativeUpdateVision called,"
-                "SBISize: %d, %d",
-                SBISize.x, SBISize.y);
-
-        // minus mean value
-        CVD::ImageRef ir;
-        unsigned int nSum = 0;
-        do {
-            nSum += imageData[ir];
-        } while (ir.next(SBISize));
-
-        float fMean = ((float) nSum) / SBISize.area();
-
-        SBI.resize(SBISize);
-        ir.home();
-        do {
-            SBI[ir] = imageData[ir] - fMean;
-        } while(ir.next(SBISize));
-        // done
-
-        convolveGaussian(SBI, 2.5);
-        MahonyAHRS::getState(state_reset);
-
-        isFirstImage = false;
-
-    } else {
-        while (imageData.size().x > 40) {
-            imageData = halfSample(imageData);
-        }
-        // minus mean value
-        CVD::ImageRef ir;
-        unsigned int nSum = 0;
-        do {
-            nSum += imageData[ir];
-        } while (ir.next(SBISize));
-
-        float fMean = ((float) nSum) / SBISize.area();
-
-        mimTemplate.resize(SBISize);
-        ir.home();
-        do {
-            mimTemplate[ir] = imageData[ir] - fMean;
-        } while(ir.next(SBISize));
-        // done
-
-        convolveGaussian(mimTemplate, 2.5);
-        double diffVal = SSD(mimTemplate, SBI);
-
-        if (frameCount == 200) {
-            __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
-                    "JNI nativeUpdateVision called,"
-                    "diffVal: %f", diffVal);
-            frameCount = 0;
-        }
-
-        if (diffVal < 40000) {
-            MahonyAHRS::setState(state_reset);
-            __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
-                            "JNI nativeUpdateVision called,"
-                            "Reset State, diffVal: %f", diffVal);
-        }
-    }
-*/
-
-    if (isFirstImage) {
+    if (isFirstImage) {                     // if first image, setup correction SBI
         SBI = SmallBlurryImage(imageData);
         SBI.MakeJacs();
         MahonyAHRS::getState(state_reset);
+        pose_reset = TooN::SO3<>::exp(
+                        WFromQ(TooN::makeVector(state_reset[0], -state_reset[2],
+                            -state_reset[1], -state_reset[3]))
+                        );
 
         SBISize = SBI.GetSize();
         __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
@@ -233,9 +167,9 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateVision( JNIEnv* env
                 SBISize.x, SBISize.y);
 
         isFirstImage = false;
-    } else {
+    } else {                                // if new image, do correction routine
         SI = SmallBlurryImage(imageData);
-        double diffVal = SI.ZMSSD(SBI);
+        double diffVal = SI.ZMSSD(SBI);     // compute SSD diff
 
         if (frameCount == 200) {
             __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
@@ -244,29 +178,32 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateVision( JNIEnv* env
             frameCount = 0;
         }
 
-        if (diffVal < 40000) {
+        if (diffVal < 20000) {              // if SSD small , do correction
             float state_now[7];
             MahonyAHRS::getState(state_now);
-            TooN::SO3<> rotation = CalcSBIRotation();       // rotation from SBI to SI
-            TooN::SO3<> pose_reset = TooN::SO3<>::exp(
-                    WFromQ(TooN::makeVector(state_reset[0], -state_reset[2],
-                        -state_reset[1], -state_reset[3]))
-                    );
-            TooN::SO3<> pose_correction = pose_reset * rotation.inverse();
+            std::pair< TooN::SO3<>, double > rotation_pair = CalcSBIRotation();       // rotation from SBI to SI
 
-            TooN::Vector<4> state_correction = QFromW(pose_correction.ln());
+            if (rotation_pair.second < 1500) {
+                TooN::SO3<> pose_correction =
+                        pose_reset * rotation_pair.first.inverse() ;        // corrected pose
+                TooN::Vector<4> state_correction =
+                        QFromW(pose_correction.ln());           // convert to Quaternion
 
-            state_now[0] = state_correction[0];
-            state_now[1] = -state_correction[2];
-            state_now[2] = -state_correction[1];
-            state_now[3] = -state_correction[3];
+                state_now[0] = state_correction[0];
+                state_now[1] = -state_correction[2];
+                state_now[2] = -state_correction[1];
+                state_now[3] = -state_correction[3];
+                state_now[4] = 0;
+                state_now[5] = 0;
+                state_now[6] = 0;
 
-            MahonyAHRS::setState(state_now);
+                MahonyAHRS::setState(state_now);                // set corrected state
 
-            countFromCorrection = 0;
-            __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
-                            "JNI nativeUpdateVision called,"
-                            "Reset State, diffVal: %f", diffVal);
+                countFromCorrection = 0;
+                __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
+                                "JNI nativeUpdateVision called,"
+                                "Reset State, diffVal: %f, error: %f", diffVal, rotation_pair.second);
+            }
         }
 
     }
@@ -274,7 +211,8 @@ Java_com_citrus_slam_MahonyAHRS_QuaternionSensor_nativeUpdateVision( JNIEnv* env
     frameCount++;
     countFromCorrection++;
 
-    if (frameCount == 400) {
+    if (countFromCorrection == 400) {               // if too long time from last correction, reset
+                                                    // correction
         isFirstImage = true;
         __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
                 "JNI nativeUpdateVision,"

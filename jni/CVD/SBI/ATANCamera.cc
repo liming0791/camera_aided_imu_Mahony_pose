@@ -3,6 +3,10 @@
 #include <TooN/helpers.h>
 #include <cvd/vector_image_ref.h>
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <android/log.h>
+#include <jni.h>
 
 using namespace std;
 using namespace CVD;
@@ -11,9 +15,33 @@ ATANCamera::ATANCamera(string sName)
 {
   // The camera name is used to find the camera's parameters in a GVar.
   msName = sName;
-  //GV2.Register(mgvvCameraParams, sName+".Parameters", mvDefaultParams, HIDDEN | FATAL_IF_NOT_DEFINED);
   mgvvCameraParams = new Vector<5>();
-  *mgvvCameraParams = mvDefaultParams;
+  ifstream file(msName);
+  if (file.is_open()) {
+      string line;
+      getline(file, line);
+      stringstream ss(line);
+      float fx, fy, cx, cy, d;
+      ss >> fx >> fy >> cx >> cy >> d;
+      (*mgvvCameraParams)[0] = fx;
+      (*mgvvCameraParams)[1] = fy;
+      (*mgvvCameraParams)[2] = cx;
+      (*mgvvCameraParams)[3] = cy;
+      (*mgvvCameraParams)[4] = d;
+      __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
+            "JNI ANTANCamera, read calibration params from file, %f %f %f %f %f",
+            fx, fy, cx, cy, d);
+
+  } else {
+      *mgvvCameraParams = mvDefaultParams;
+      __android_log_print(ANDROID_LOG_INFO, "JNIMsg",
+                  "JNI ANTANCamera, use default calibration params, %f %f %f %f %f",
+                  (*mgvvCameraParams)[0],
+                  (*mgvvCameraParams)[1],
+                  (*mgvvCameraParams)[2],
+                  (*mgvvCameraParams)[3],
+                  (*mgvvCameraParams)[4]);
+  }
   mvImageSize[0] = 640.0;
   mvImageSize[1] = 480.0;
   RefreshParams();
